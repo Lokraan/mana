@@ -44,6 +44,11 @@ defmodule Blockchain.Transaction do
           data: binary()
         }
 
+  @type status :: 0 | 1
+
+  @success_status 1
+  @failure_status 0
+
   @doc """
   Encodes a transaction such that it can be RLP-encoded.
   This is defined at L_T Eq.(15) in the Yellow Paper.
@@ -161,7 +166,7 @@ defmodule Blockchain.Transaction do
   Validates the validity of a transaction and then executes it if transaction is valid.
   """
   @spec execute_with_validation(EVM.state(), t, Header.t()) ::
-          {EVM.state(), Gas.t(), EVM.SubState.logs(), EVM.Configuration.t()}
+          {EVM.state(), Gas.t(), EVM.SubState.logs(), EVM.Configuration.t(), status()}
   def execute_with_validation(
         state,
         tx,
@@ -186,11 +191,11 @@ defmodule Blockchain.Transaction do
   the execution of EVM-code.
   """
   @spec execute(EVM.state(), t, Header.t(), EVM.Configuration.t()) ::
-          {EVM.state(), Gas.t(), EVM.SubState.logs()}
+          {EVM.state(), Gas.t(), EVM.SubState.logs(), status()}
   def execute(state, tx, block_header, config \\ EVM.Configuration.Frontier.new()) do
     {:ok, sender} = Transaction.Signature.sender(tx)
 
-    {updated_state, remaining_gas, sub_state} =
+    {updated_state, remaining_gas, sub_state, status} =
       state
       |> begin_transaction(sender, tx)
       |> apply_transaction(tx, block_header, sender, config)
@@ -203,12 +208,13 @@ defmodule Blockchain.Transaction do
       |> clean_up_accounts_marked_for_destruction(sub_state, block_header)
       |> clean_touched_accounts(sub_state, config)
 
-    # { σ', Υ^g, Υ^l }, as defined in Eq.(79) and Eq.(80)
-    {final_state, expended_gas, sub_state.logs}
+    # {σ', Υ^g, Υ^l, Y^z}, as defined in the Transaction Execution section of
+    # the Yellow Paper
+    {final_state, expended_gas, sub_state.logs, status}
   end
 
   @spec apply_transaction(EVM.state(), t, Header.t(), EVM.address(), EVM.Configuration.t()) ::
-          {EVM.state(), Gas.t(), EVM.SubState.t()}
+          {EVM.state(), Gas.t(), EVM.SubState.t(), status()}
   defp apply_transaction(state, tx, block_header, sender, config) do
     # sender and originator are the same for transaction execution
     originator = sender
@@ -234,8 +240,13 @@ defmodule Blockchain.Transaction do
         config: config
       }
 
-      {_, result} = Contract.create(params)
-      result
+      case Contract.create(params) do
+        {:ok, {state, remaining_gas, sub_state}} ->
+          {state, remaining_gas, sub_state, @success_status}
+
+        {:error, {state, remaining_gas, sub_state}} ->
+          {state, remaining_gas, sub_state, @failure_status}
+      end
     else
       params = %Contract.MessageCall{
         state: state,
@@ -255,10 +266,18 @@ defmodule Blockchain.Transaction do
 
       # Note, we only want to take the first 3 items from the tuples,
       # as designated Θ_3 in the literature Θ_3
-      {state, remaining_gas_, sub_state_, _output} = Contract.message_call(params)
+      {state, remaining_gas_, sub_state_, status} =
+        case Contract.message_call(params) do
+          {:ok, {state, remaining_gas, sub_state, _output}} ->
+            {state, remaining_gas, sub_state, @success_status}
+
+          {:error, {state, remaining_gas, sub_state, _output}} ->
+            {state, remaining_gas, sub_state, @failure_status}
+        end
+
       sub_state = SubState.add_touched_account(sub_state_, block_header.beneficiary)
 
-      {state, remaining_gas_, sub_state}
+      {state, remaining_gas_, sub_state, status}
     end
   end
 
