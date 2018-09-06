@@ -170,8 +170,11 @@ defmodule Blockchain.Transaction do
       ) do
     validation_result = Validity.validate(state, tx, block_header, config)
 
-    with :valid <- validation_result do
-      execute(state, tx, block_header, config)
+    case validation_result do
+      :valid ->
+        execute(state, tx, block_header, config)
+
+      {:invalid, _} -> {state, 0, []}
     end
   end
 
